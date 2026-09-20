@@ -227,6 +227,49 @@ export function isTransientUpstreamError(status: number, body: string): boolean 
     return TRANSIENT_BODY_MARKERS.some((marker) => lower.includes(marker));
 }
 
+/** Transport-level error codes eligible for the bounded network retry (#1041):
+ *  the connection never produced a usable response — reset, refused, timed
+ *  out at the TCP/TLS layer, or undici's own connect/socket failures. An
+ *  upstream proxy outage (clash blip) surfaces as exactly these. */
+const NETWORK_ERROR_CODES = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ECONNABORTED",
+    "EPIPE",
+    "UND_ERR_SOCKET",
+    "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** Message fragments of network-class failures that carry no errno `code`
+ *  (the Node TLS wrapper and the http-parser "socket hang up"). */
+const NETWORK_ERROR_MESSAGES = [
+    "socket hang up",
+    "client network socket disconnected before secure tls connection was established",
+    "connect timeout error",
+];
+
+/** True when `error` (walking its `cause` chain) is a network-class transport
+ *  failure — the retryable tier for the initial upstream forward (#1041).
+ *  Deliberately NOT classified: HTTP 4xx/5xx responses (isTransientUpstreamError
+ *  owns those), watchdog AbortError (a 12-min idle stall must not be paid
+ *  twice), and DNS ENOTFOUND (a wrong upstream name just fails again). */
+export function isNetworkClassUpstreamError(error: unknown): boolean {
+    const seen = new Set<unknown>();
+    let current: unknown = error;
+    while (current && typeof current === "object" && !seen.has(current)) {
+        seen.add(current);
+        const err = current as { code?: unknown; message?: unknown; cause?: unknown };
+        if (typeof err.code === "string" && NETWORK_ERROR_CODES.has(err.code)) return true;
+        if (typeof err.message === "string") {
+            const lower = err.message.toLowerCase();
+            if (NETWORK_ERROR_MESSAGES.some((m) => lower.includes(m))) return true;
+        }
+        current = err.cause;
+    }
+    return false;
+}
+
 /** Total requests per replay attempt (initial + retries). */
 export const REPLAY_MAX_ATTEMPTS = 3;
 

@@ -13,7 +13,7 @@ import { FALLBACK_EFFECTIVE_WINDOW_FLOOR, findRoute, lookupContextLimit, resolve
 import { contextFromRegistry, loadRegistry, peekRegistryContext, peekRegistryOutputLimit } from "./registry.js";
 import { codexAlignedWindow } from "./codex-models.js";
 import { fetchWithTimeout, MAX_REQUEST_BYTES, upstreamTimeoutMs } from "./fetch-util.js";
-import { formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
+import { fetchUpstreamResilient, formatUpstreamError, getUpstreamConnectionStatus, recordUpstreamConnection, resolveProxy, resolveProxyDecision, proxyDispatcher, type UpstreamProxyDecision } from "./upstream-proxy.js";
 import { maskHeaderForLog, maskHeadersForLog, maskHostPortForLog, setMaskHostsEnabled, maskUrlForLog, maskUrlsInText } from "./log-mask.js";
 // Protocol codecs + the historical-image strip primitive live in the kernel now
 // (single source of truth shared with the omp/pi adapters): import from
@@ -3797,13 +3797,15 @@ async function forward(
             log("info", `[debug] RAW request dump: ${reqPath}`);
         } catch (err) { logDumpFailure("REQ dump", err); }
     }
+    // #1041: the initial dispatcher is owned by fetchUpstreamResilient (per
+    // attempt: proxy, or direct on an opted-in failover) — init stays
+    // dispatcher-free. Later re-send paths below still pass `dispatcher`.
     const dispatcher = proxyDispatcher(proxyUrl);
-    const init: Omit<RequestInit, "dispatcher"> & { dispatcher?: object } = {
+    const init: Omit<RequestInit, "dispatcher"> = {
         method: req.method ?? "GET",
         headers,
         body: req.method === "GET" || req.method === "HEAD" ? undefined : wireBody,
     };
-    if (dispatcher) init.dispatcher = dispatcher;
     // Must be created before fetchWithTimeout: the signal aborts the upstream
     // request when the client disconnects (IDE cancel), otherwise the proxy
     // keeps reading upstream and holds the per-session lock. Also passed to
@@ -3813,16 +3815,21 @@ async function forward(
     res.on("close", () => {
         if (!res.writableEnded) clientAbort.abort();
     });
-    let upstreamResult: Awaited<ReturnType<typeof fetchWithTimeout>>;
+    let upstreamResult: Awaited<ReturnType<typeof fetchUpstreamResilient>>;
     try {
-        upstreamResult = await fetchWithTimeout(upstreamUrl, init, undefined, clientAbort.signal);
-        recordUpstreamConnection(upstreamUrl, proxyUrl);
+        upstreamResult = await fetchUpstreamResilient(upstreamUrl, init, {
+            proxyUrl,
+            failoverDirect: opts.upstreamProxyFailover === "direct",
+            signal: clientAbort.signal,
+            label: prepared?.session.id,
+            log,
+        });
     } catch (error) {
-        recordUpstreamConnection(upstreamUrl, proxyUrl, error);
         // #604: a network-level failure (socket reset, timeout abort) also never
         // reports usage — arm the emergency shrink like the 5xx branch below.
+        // #1041: still armed here when every retry / failover attempt failed.
         if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure");
-        throw new Error(`upstream request failed: ${formatUpstreamError(error, upstreamUrl, proxyUrl)}`, { cause: error });
+        throw error;
     }
     // #552 learn-on-failure: a converting upstream that rejects a role (codex
     // ≥0.153 sends "developer"; vLLM/SGLang-style backends answer 400
@@ -3848,12 +3855,12 @@ async function forward(
             // same bytes verbatim (fetchWithTimeout ships rebuilt Responses
             // itself, so this shape is established).
             upstreamResult = {
+                ...upstreamResult,
                 response: new Response(roleErrText, {
                     status: upstreamResult.response.status,
                     statusText: upstreamResult.response.statusText,
                     headers: new Headers(upstreamResult.response.headers),
                 }),
-                clearTimer: upstreamResult.clearTimer,
             };
             const rejection = detectRoleRejection(upstreamResult.response.status, roleErrText);
             if (rejection && rejection.role !== "system") {
@@ -3887,14 +3894,19 @@ async function forward(
                     if (fixed.rewritten === 0) return "other";
                     let r: Awaited<ReturnType<typeof fetchWithTimeout>>;
                     try {
-                        r = await fetchWithTimeout(upstreamUrl, { ...init, body: fixed.body }, undefined, clientAbort.signal);
+                        r = await fetchWithTimeout(
+                            upstreamUrl,
+                            { ...init, body: fixed.body, ...(dispatcher ? { dispatcher } : {}) },
+                            undefined,
+                            clientAbort.signal,
+                        );
                     } catch {
                         return "other"; // transport failure — keep the original 400
                     }
                     if (r.response.ok) {
                         upstreamResult.clearTimer();
                         remember(target, fixed.rewritten);
-                        upstreamResult = r;
+                        upstreamResult = { ...upstreamResult, ...r };
                         return "ok";
                     }
                     let errText: string | null = null;

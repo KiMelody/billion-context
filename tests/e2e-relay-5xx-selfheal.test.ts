@@ -92,8 +92,11 @@ function relayConversation(): Msg[] {
 interface RelayOpts {
     /** Return this status for the FIRST streaming call, unconditionally. */
     failFirstStreamingWith?: number;
-    /** Destroy the socket on the first streaming call (network-level failure). */
-    destroyFirst?: boolean;
+    /** Destroy the socket on the first N streaming calls (network-level
+     *  failure). #1041: bili retries network-class forward failures (default
+     *  2 retries → 3 attempts), so the outage must outlast the retry ladder
+     *  for the request to surface as bili's 502. */
+    destroyFirstStreaming?: number;
 }
 
 /** Mock relay: enforces its hidden token tolerance on every streaming call
@@ -119,7 +122,7 @@ function makeRelay(opts: RelayOpts) {
                 return;
             }
             streamingCall += 1;
-            if (opts.destroyFirst && streamingCall === 1) {
+            if (opts.destroyFirstStreaming && streamingCall <= opts.destroyFirstStreaming) {
                 req.socket.destroy();
                 return;
             }
@@ -242,7 +245,9 @@ test("e2e #604: relay 5xx on near-window payload → arm → next retry truncate
 });
 
 test("e2e #604: network-level failure arms the emergency shrink too", async () => {
-    const relay = makeRelay({ destroyFirst: true });
+    // #1041: the relay stays dark for the whole default retry ladder (3
+    // attempts) so the outage still surfaces as bili's 502 and arms the shrink.
+    const relay = makeRelay({ destroyFirstStreaming: 3 });
     relay.server.listen(0, "127.0.0.1");
     await once(relay.server, "listening");
     const upstreamPort = relay.server.address().port;

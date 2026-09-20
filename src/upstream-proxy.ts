@@ -5,7 +5,13 @@ import { Pool, ProxyAgent } from "undici";
 import type { ProviderRoutes } from "./config.js";
 import { log as loggerLog } from "./logger.js";
 import { maskHostInText, maskUrlForLog } from "./log-mask.js";
-import { upstreamTimeoutMs } from "./fetch-util.js";
+import {
+    fetchWithTimeout,
+    isNetworkClassUpstreamError,
+    sleep,
+    upstreamTimeoutMs,
+    type FetchOptions,
+} from "./fetch-util.js";
 
 export type ParsedHttpProxy = {
     url: string;
@@ -516,6 +522,107 @@ export function recordUpstreamConnection(url: string, proxyUrl: string | undefin
 
 export function getUpstreamConnectionStatus(): UpstreamConnectionStatus {
     return { ...lastConnection };
+}
+
+/** Retries AFTER the initial attempt (#1041, default 2 → 3 total attempts). */
+const UPSTREAM_RETRY_MAX = 2;
+/** Flat delay between retry attempts (#1041). */
+const UPSTREAM_RETRY_DELAY_MS = 500;
+
+export type UpstreamResilienceOptions = {
+    /** Configured upstream proxy; undefined = direct egress, nothing to retry
+     *  around (still retried, just never via a proxy). */
+    proxyUrl?: string;
+    /** Opt-in (#1041): after the proxied attempts are exhausted, make ONE
+     *  final attempt bypassing the proxy. Default OFF — sending model traffic
+     *  outside the user's chosen egress is a behavior change the user must
+     *  select. */
+    failoverDirect?: boolean;
+    /** Downstream (client) signal — aborting it fails the current attempt
+     *  fast; AbortError is not network-class so no retry is scheduled. */
+    signal?: AbortSignal;
+    maxRetries?: number;
+    baseDelayMs?: number;
+    /** Session id prefixing the retry log line. */
+    label?: string;
+    log?: (level: string, msg: string) => void;
+};
+
+export type UpstreamResilientResult = {
+    response: Response;
+    clearTimer: () => void;
+    /** Total requests actually made (1 = no retry fired). */
+    attempts: number;
+    /** True when the winning attempt bypassed the configured proxy (#1041). */
+    failoverDirect: boolean;
+};
+
+/** fetchWithTimeout wrapped in the #1041 upstream-resilience ladder: bounded
+ *  retry on network-class transport failures (reset / refused / connect
+ *  timeout / TLS dropped before any response header), then — only when the
+ *  user opted in via upstreamProxyFailover:"direct" — one final attempt with
+ *  the proxy bypassed.
+ *
+ *  Retry-safety: this wraps ONLY the pre-response fetch. A failure after
+ *  response headers exist is a stream error the caller pipes through — no
+ *  response byte can have reached the client inside this function, so
+ *  replaying the request is always safe (model POSTs are client-replayed
+ *  histories). HTTP error statuses are returned as-is; isTransientUpstreamError
+ *  (fetchWithRetry) owns that tier. */
+export async function fetchUpstreamResilient(
+    url: string,
+    init: FetchOptions,
+    resilience: UpstreamResilienceOptions,
+): Promise<UpstreamResilientResult> {
+    const proxyUrl = resilience.proxyUrl;
+    const maxRetries = Math.max(0, resilience.maxRetries ?? UPSTREAM_RETRY_MAX);
+    const baseDelayMs = Math.max(0, resilience.baseDelayMs ?? UPSTREAM_RETRY_DELAY_MS);
+    const failover = resilience.failoverDirect === true && !!proxyUrl;
+    const proxyAttempts = 1 + maxRetries;
+    const totalAttempts = proxyAttempts + (failover ? 1 : 0);
+    const prefix = resilience.label ? `[${resilience.label}] ` : "";
+    let attempts = 0;
+    let lastError: unknown;
+    let lastAttemptProxied = !!proxyUrl;
+    while (attempts < totalAttempts) {
+        attempts++;
+        const failoverAttempt = failover && attempts > proxyAttempts;
+        lastAttemptProxied = !!proxyUrl && !failoverAttempt;
+        try {
+            const dispatcher = lastAttemptProxied ? proxyDispatcher(proxyUrl) : undefined;
+            const result = await fetchWithTimeout(
+                url,
+                dispatcher ? { ...init, dispatcher } : init,
+                undefined,
+                resilience.signal,
+            );
+            recordUpstreamConnection(url, lastAttemptProxied ? proxyUrl : undefined);
+            return {
+                response: result.response,
+                clearTimer: result.clearTimer,
+                attempts,
+                failoverDirect: failoverAttempt,
+            };
+        } catch (error) {
+            lastError = error;
+            recordUpstreamConnection(url, lastAttemptProxied ? proxyUrl : undefined, error);
+            if (!isNetworkClassUpstreamError(error)) break;
+            if (attempts >= totalAttempts) break;
+            const nextIsFailover = failover && attempts + 1 > proxyAttempts;
+            resilience.log?.(
+                "warn",
+                `${prefix}upstream ${lastAttemptProxied ? `proxy ${redactProxyUrl(proxyUrl) ?? ""}` : "connect"} failed (attempt ${attempts}/${totalAttempts}, network-class) — retrying${nextIsFailover ? " via direct failover" : ""}`,
+            );
+            if (!nextIsFailover) await sleep(baseDelayMs, resilience.signal);
+        }
+    }
+    const transport = lastAttemptProxied && proxyUrl
+        ? `upstream proxy ${redactProxyUrl(proxyUrl) ?? ""} failed`
+        : "upstream connect failed";
+    throw new Error(
+        `upstream request failed: ${transport} after ${attempts} attempt(s): ${formatUpstreamError(lastError, url, proxyUrl)}`,
+        { cause: lastError instanceof Error ? lastError : undefined },
+    );
 }
 
 export function _resetUpstreamProxyForTest(): void {

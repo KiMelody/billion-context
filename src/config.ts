@@ -387,6 +387,10 @@ export type ProxyOptions = {
      *  Empty string explicitly disables environment/system proxy fallback. */
     proxy?: string;
     proxyMode?: UpstreamProxyMode;
+    /** #1041: "direct" = after the configured upstream proxy exhausts its
+     *  network-class retries, that request falls back to direct egress.
+     *  Default undefined (OFF). */
+    upstreamProxyFailover?: "direct";
     proxySource?: "bili-env" | "web-manual" | "config" | "auto" | "direct";
     proxyFallback?: ProxyFallbackOptions;
     /** Auxiliary-egress fallback (#1012): same shape as proxyFallback but its
@@ -579,6 +583,7 @@ export function loadOptions(env: NodeJS.ProcessEnv = process.env): ProxyOptions 
         routes,
         proxy,
         proxyMode,
+        upstreamProxyFailover: parseUpstreamProxyFailover(env.BILI_UPSTREAM_PROXY_FAILOVER ?? fileConfig.upstreamProxyFailover),
         proxySource,
         proxyFallback,
         modelContextLimit,
@@ -643,6 +648,9 @@ type FileConfig = {
     updateTag?: string;
     upstreamProxy?: string;
     upstreamProxyMode?: string;
+    /** #1041: set "direct" to fall back to direct egress after the upstream
+     *  proxy fails network-class retries. Default off. */
+    upstreamProxyFailover?: string;
     logFile?: string;
     /** Global compression block (level 1 of 3). Holds the injection toggles
      *  (`injectTool` / `injectNudge`, honored globally) plus the tuning fields
@@ -858,6 +866,12 @@ export function parsePromptCacheRouting(value: string | undefined): PromptCacheR
 
 export function parseUpstreamProxyMode(value: string | undefined): UpstreamProxyMode {
     return value === "manual" || value === "auto" ? value : "direct";
+}
+
+/** #1041: only "direct" is a recognized value; anything else (including
+ *  undefined) means the failover stays OFF — it must be an explicit opt-in. */
+export function parseUpstreamProxyFailover(value: string | undefined): "direct" | undefined {
+    return value === "direct" ? "direct" : undefined;
 }
 
 export function parseCompressSettings(v: unknown): (CompressSettings & { injectTool?: boolean; injectNudge?: boolean }) | undefined {

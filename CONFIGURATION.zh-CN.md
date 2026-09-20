@@ -122,6 +122,13 @@
 - **状态：** ACTIVE
 - **说明：** 用于代理**自身**到模型 provider 的出站连接的上游 HTTP 代理（`http://host:port`）。不支持 SOCKS5。在 `providers` 条目内设置的按 URL 的 `proxy` 会针对该 provider 覆盖此项。空字符串表示"显式直连" —— 为所有 provider 禁用任何环境/系统代理回退。
 
+### `upstreamProxyFailover`
+
+- **类型：** `"direct"`
+- **默认值：** *（无 —— 兜底关闭）*
+- **状态：** ACTIVE
+- **说明：** 针对不稳定上游代理的 opt-in 兜底（#1041）。网络类转发失败（连接重置 / 拒绝、连接超时、TLS 建立前断开 —— 即"clash 抖了"的特征）始终会按有界阶梯重试（默认重试 2 次、间隔约 500ms —— 配置了代理时经代理重试，未配置时直连重试），无需任何开关。设置 `"upstreamProxyFailover": "direct"` 后，代理路径的尝试全部耗尽时，该请求会做**最后一次**绕过代理的直连出网尝试（在上游 API 本身可不经 VPN 直达时有效）。重试只覆盖响应前的转发：一旦响应字节开始发往客户端，流中失败将原样透传，绝不重放。失败错误与日志携带尝试次数与凭证脱敏后的代理 URL（`upstream proxy http://… failed after N attempt(s)`），代理故障一眼可辨。默认关闭 —— 让模型流量绕开你所配置的代理是行为变更，必须显式选择。也可通过 `BILI_UPSTREAM_PROXY_FAILOVER=direct` 设置（env 优先）。
+
 ### `imageBilling`
 
 - **类型：** `"auto" | "pixels" | "bytes"`
@@ -509,6 +516,7 @@
 | `BILI_LOG_MASK_HOSTS` | 设为 `0` 关闭代理日志的 host 脱敏（#897）：非公开目标主机（私有 relay、内网域名）原样记录，而不是 `<private-host>`。默认开启（#255 —— 日志常被整段贴进公开 issue）；凭据头脱敏与之独立、始终开启。真实目标域名不依赖此开关也可查：`GET /__bili/stats` → `blindTunnels`、`GET /__bili/health`（均仅 loopback），以及 `acp_status` 输出。 |
 | `BILI_SUBAGENT_SPLIT` | 设为 `0` 关闭 Claude Code subagent 会话分流（#970）：默认情况下，anthropic 线路上同时携带 `x-claude-code-agent-id` + `x-claude-code-parent-agent-id` 头的请求（后台 subagent）会获得独立的 `<session>\|sub:<agent-id>` 会话 —— 独立的锁链与压缩状态 —— 不再排在主会话的锁后面。默认开启。配置文件中设 `"subagentSplit": false` 效果相同；环境变量优先。 |
 | `BILI_UPSTREAM_PROXY` | 代理自身出站连接的上游代理 —— 优先级最高，高于 per-URL/per-provider 配置。见 README「上游代理」一节。 |
+| `BILI_UPSTREAM_PROXY_FAILOVER` | 设为 `direct` 以启用 #1041 直连兜底：上游代理耗尽某次转发的网络类重试阶梯（默认重试 2 次、间隔约 500ms）后，该请求做最后一次绕过代理的直连尝试。默认关闭。见 [`upstreamProxyFailover`](#upstreamproxyfailover)。 |
 | `BILI_INHERITED_HTTP_PROXY` / `BILI_INHERITED_HTTPS_PROXY` / `BILI_INHERITED_ALL_PROXY` / `BILI_INHERITED_NO_PROXY` | 非用户直接使用 —— launcher 起代理子进程时自动设置（#1012）。launcher 会从客户端和代理子进程两侧剥掉 shell 的代理变量（客户端必须把流量发给 bili；代理的模型出网也不能被 shell 代理劫持），但会把用户剥离前的代理转发到这些变量里，让代理的**辅助出网**（MITM 盲隧道 —— 客户端侧的 MCP/web 流量）仍能走用户的 VPN。它们只作用于盲隧道的 fallback 层：显式路由 / 全局 `proxy` / `BILI_UPSTREAM_PROXY` / 显式 `"upstreamProxyMode": "direct"` 仍然优先，指向 bili 自身端口的值会被丢弃。模型出网不受影响（未显式配置则保持直连）。 |
 | `BILI_UPSTREAM_TIMEOUT_MS` | 上游请求的空闲预算（毫秒）：首字节时间（TTFB）与响应体块之间的间隔（默认 `720000` = 12 分钟）。持续产出数据块的健康流永远不会被中途切断；静默的流才会。同一个值同时驱动底层 HTTP 客户端的传输层超时，因此这一个旋钮即可端到端约束本地大模型的超长 prefill（#551）。 |
 | `BILI_PERSIST` | 设 `0` 关闭会话持久化（仅内存，重启即丢）。 |
