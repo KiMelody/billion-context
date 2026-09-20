@@ -644,7 +644,7 @@ export async function startServer(opts: ProxyOptions): Promise<http.Server> {
         // egress — they resolve with the aux fallback so the launcher-forwarded
         // user proxy (BILI_INHERITED_*) applies here and ONLY here; the model
         // paths below keep the clean-env direct semantics (e1c6c92).
-        setupMitm(server, opts.mitm.domains, (msg) => log("info", msg), (host) => resolveProxy(opts.routes, opts.proxy, `https://${host}`, opts.auxProxyFallback ?? opts.proxyFallback), allowRemoteConnect);
+        setupMitm(server, opts.mitm.domains, (msg) => log("info", msg), (host) => resolveProxy(opts.routes, opts.proxy, `https://${host}`, opts.auxProxyFallback ?? opts.proxyFallback), allowRemoteConnect, opts.mitm.excludeDomains ?? []);
     }
     // Launcher mode handshake (#407): the child self-binds and retries on
     // EADDRINUSE instead of dying, reporting the real origin via the instance
