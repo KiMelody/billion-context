@@ -178,6 +178,7 @@ This index is generated from `website/config-reference/*.yaml` — edit the seed
 | `network.wsOutboundBytes` | number | 10485760 | BILI_WS_OUTBOUND_BYTES | Soft byte budget for the WebSocket lane only (#3701): when the final serialized Responses WS frame exceeds it, older images are shed from the OUTBOUND COPY first (archived as placeholder notes — originals stay in session storage, recoverable via read_original_image / decompress), then whatever remains is boundedly downscaled through the jimp maxDim ladder. If the frame still does not fit and the upstream closes with 1009 before any event, one strictly smaller resend is attempted within the same request. Set 0 to disable shedding (previous send-as-is behavior). HTTP lanes are unaffected — the hard refusal cap stays network.outboundBodyBytes. |
 | `network.httpOutboundBytes` | number | 10485760 | BILI_HTTP_OUTBOUND_BYTES | Soft byte budget for the plain/proxy/pi-native HTTP relay lane (#3909): when the final serialized request exceeds it, older images are shed from the OUTBOUND COPY first (archived as placeholder notes — originals stay in session storage, recoverable via read_original_image / decompress), then whatever remains is boundedly downscaled through the jimp maxDim ladder. Closes the gap image-dense sessions leave open: token-space folding decides in tokens while the upstream rejects in bytes / pixel-decode CPU (Cloudflare Worker 503), so a ~48 MiB request 503s forever with every retry resending the same pixels. Applies only when no managed transport is installed (the spawned relay); the WS lane uses network.wsOutboundBytes and managed HTTP transports (inline-engine / dsh-inline) are never shed here (#3701 Finding 1). Set 0 to disable (previous send-as-is); the hard refusal cap stays network.outboundBodyBytes. |
 | `network.caFile` | string | unset | BILI_CA_FILE | Path to a PEM file with extra root CAs trusted by bili's OWN upstream fetches (#3776). Merged with Node's built-in roots and any NODE_EXTRA_CA_CERTS entries — never replaces them. For security software doing HTTPS/encrypted-connection scanning (Kaspersky, enterprise DLP) or a corporate MITM proxy that re-signs the upstream: export that root CA to PEM and point this at it. Unset = default trust, byte-identical behavior. |
+| `network.upstreamProxyFailover` | string | unset (off) | BILI_UPSTREAM_PROXY_FAILOVER | Opt-in direct failover: when a proxied forward exhausts its replay ladder on a fail-fast transport death, one last attempt goes out without the proxy. Only "direct" enables; unset or any other value keeps it off. |
 | `guardrails` | object | {} (all defaults) | — | Guardrails: tool-output guardrails for the pi/omp plugin bundles (#3066) plus the proxy-side text-run stream guard (#3406). |
 | `guardrails.bashTimeout` | number | 60 | BILI_GUARDRAIL_BASH_TIMEOUT | Seconds injected as the bash tool's timeout when the model omits it (#3066 owner intent, re-affirmed #3366: an unsupervised bash call could hang a pi session for a whole day — the host schema provides no default). Set N to tune, 0 to disable injection (pi-native no-default). |
 | `guardrails.maxOutputBytes` | number | 50000 | BILI_GUARDRAIL_MAX_OUTPUT_BYTES | Combined text-output byte cap per tool result in the pi/omp plugin (0 disables the cap). Over-cap output is truncated head-first with a notice pointing at the host-saved full output. |
@@ -895,7 +896,8 @@ Since #2030 every pure-behavior knob has a config-file key alongside its env var
     "preflightDeadEndCooldownMs": 300000, // cooldown after a dead-end preflight verdict
     "proxyKeepAliveMaxMs": 55000,         // upstream-proxy connection reuse cap; 0 uncapped
     "postResponseLingerMs": 5000,         // post-response close linger budget (#1982)
-    "allowPrivateHttpProviders": false    // opt-in: private-network plain-HTTP providers (#2984)
+    "allowPrivateHttpProviders": false,    // opt-in: private-network plain-HTTP providers (#2984)
+    "upstreamProxyFailover": "direct"     // opt-in direct failover when the proxy exhausts its replay ladder; default off
   },
 
   // Session persistence
@@ -1905,6 +1907,7 @@ File keys resolve only when the matching env var is unset. Defaults in parenthes
 | `BILI_UPDATE_STAGGER_MAX_MS` | `update.staggerMaxDelayMs` | 172800000 (built-in 48 h) |
 | `BILI_UPDATE_STAGGER_MIN_MS` | `update.staggerMinDelayMs` | 900000 (built-in 15 min) |
 | `BILI_UPSTREAM_PROXY` | `proxy` | unset (direct) |
+| `BILI_UPSTREAM_PROXY_FAILOVER` | `network.upstreamProxyFailover` | unset (off) |
 | `BILI_UPSTREAM_PROXY_MODE` | `upstreamProxyMode` | auto (unset behaves as direct) |
 | `BILI_UPSTREAM_TIMEOUT_MS` | `network.upstreamTimeoutMs` | 720000 |
 | `BILI_WS_OUTBOUND_BYTES` | `network.wsOutboundBytes` | 10485760 |

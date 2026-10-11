@@ -5,8 +5,8 @@ import { Pool, ProxyAgent } from "undici";
 import type { ProviderRoutes } from "./config.js";
 import { log as loggerLog } from "./logger.js";
 import { maskHostInText, maskHostPortForDisplay, maskUrlForLog } from "./log-mask.js";
-import { upstreamTimeoutMs } from "./fetch-util.js";
-import { classifyUpstreamFailure, hintWithSkippedProxy, isTlsTrustCode, redactProxyUrl, tlsTrustRemediation, type SkippedProxyInfo, type UpstreamFailureDetail } from "./upstream-fail.js";
+import { fetchWithTimeout, fetchWithTransportRetry, upstreamTimeoutMs, type FetchOptions, type ReplayRetryInfo } from "./fetch-util.js";
+import { classifyUpstreamFailure, hintWithSkippedProxy, isFailFastUpstreamKind, isTlsTrustCode, redactProxyUrl, tlsTrustRemediation, type SkippedProxyInfo, type UpstreamFailureDetail } from "./upstream-fail.js";
 import { upstreamCaIdentity, upstreamExtraCa } from "./upstream-ca.js";
 import { proxyKeepAliveMaxMs as knobProxyKeepAliveMaxMs } from "./knobs.js";
 
@@ -621,6 +621,86 @@ export function recordUpstreamConnection(url: string, proxyUrl: string | undefin
 
 export function getUpstreamConnectionStatus(): UpstreamConnectionStatus {
     return { ...lastConnection };
+}
+
+export type UpstreamFailoverFetch = Awaited<ReturnType<typeof fetchWithTimeout>> & {
+    /** Proxy the successful send actually rode — undefined when the opt-in
+     *  direct failover carried it. Callers pass this to
+     *  recordUpstreamConnection so the status snapshot matches the real path.
+     *  Optional so relay's downstream rebuild/reassign sites (#552 role
+     *  ladder, #1195 overflow refold) keep bare fetchWithTimeout shapes. */
+    egressProxy?: string | undefined;
+};
+
+/** #1041 design point A: the egress of the attempt that actually failed.
+ *  Present only on errors the failover wrapper rethrows; `proxy: undefined`
+ *  means the last attempt was direct (the opt-in bypassed the proxy). */
+export type UpstreamFailoverEgress = {
+    proxy: string | undefined;
+};
+
+const EGRESS_PROXY_KEY = Symbol.for("bili.upstreamProxyFailover.egressProxy");
+
+function noteFailoverEgress(error: unknown, proxy: string | undefined): void {
+    if (error === null || typeof error !== "object") return;
+    Object.defineProperty(error, EGRESS_PROXY_KEY, { value: proxy ?? null, enumerable: false, configurable: true });
+}
+
+/** Read back the real egress of a failed forward. Undefined = the error was
+ *  not stamped by the failover wrapper (no failover engaged), so callers keep
+ *  their configured proxyUrl. A present result with `proxy: undefined` means
+ *  the failing attempt rode the direct fallback. */
+export function upstreamFailoverEgress(error: unknown): UpstreamFailoverEgress | undefined {
+    if (error === null || typeof error !== "object") return undefined;
+    const holder = error as Record<PropertyKey, unknown>;
+    if (!(EGRESS_PROXY_KEY in holder)) return undefined;
+    const value = holder[EGRESS_PROXY_KEY];
+    return { proxy: typeof value === "string" ? value : undefined };
+}
+
+/** #1041 opt-in direct failover around the main model path's
+ *  fetchWithTransportRetry: when a PROXIED request exhausts the whole replay
+ *  ladder on a fail-fast transport failure (isFailFastUpstreamKind — the
+ *  attempt died before any response byte), ONE last attempt goes out without
+ *  the proxy dispatcher. Single fetchWithTimeout — no second replay ladder.
+ *  Never fires without a proxy in the path, without the explicit
+ *  upstreamProxyFailover=direct opt-in, for non-fail-fast deaths (a timeout
+ *  may have reached the upstream; a client abort kills the request), or for
+ *  HTTP verdicts (fetchWithTransportRetry returns those, never throws them). */
+export async function fetchWithUpstreamProxyFailover(
+    url: string,
+    opts: FetchOptions,
+    timeoutMs: number | undefined,
+    externalSignal: AbortSignal | undefined,
+    onRetry: ((info: ReplayRetryInfo) => void) | undefined,
+    proxyUrl: string | undefined,
+    failover: boolean,
+    log: (level: string, msg: string) => void,
+): Promise<UpstreamFailoverFetch> {
+    try {
+        const result = await fetchWithTransportRetry(url, opts, timeoutMs, externalSignal, onRetry);
+        return { ...result, egressProxy: proxyUrl };
+    } catch (error) {
+        if (!proxyUrl || !failover) throw error;
+        const kind = classifyUpstreamFailure(error, { viaProxy: true, externalAborted: externalSignal?.aborted === true });
+        if (!isFailFastUpstreamKind(kind)) throw error;
+        log("warn", `[upstream-proxy] ${maskUrlForLog(url)} proxy ${redactProxyUrl(proxyUrl)} failed after the full replay ladder (${kind}) — one direct failover attempt (upstreamProxyFailover=direct)`);
+        const directOpts: FetchOptions = { ...opts };
+        delete directOpts.dispatcher;
+        try {
+            const result = await fetchWithTimeout(url, directOpts, timeoutMs, externalSignal);
+            log("warn", `[upstream-proxy] ${maskUrlForLog(url)} succeeded via direct failover (proxy ${redactProxyUrl(proxyUrl)} bypassed)`);
+            return { ...result, egressProxy: undefined };
+        } catch (directError) {
+            const directKind = classifyUpstreamFailure(directError, { externalAborted: externalSignal?.aborted === true });
+            // The return-value egress channel is gone on a throw; stamp the real
+            // egress (direct = undefined) so relay's catch attributes the failure
+            // to the path that actually died (#1041 design point A).
+            noteFailoverEgress(directError, undefined);
+            log("warn", `[upstream-proxy] ${maskUrlForLog(url)} direct failover failed too (${directKind}) — upstream unreachable with and without proxy ${redactProxyUrl(proxyUrl)}`);
+            throw directError;
+        }
+    }
 }
 
 export function _resetUpstreamProxyForTest(): void {

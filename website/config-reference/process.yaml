@@ -180,6 +180,13 @@ entries:
     group: process
     desc_en: "Path to a PEM file with extra root CAs trusted by bili's OWN upstream fetches (#3776). Merged with Node's built-in roots and any NODE_EXTRA_CA_CERTS entries — never replaces them. For security software doing HTTPS/encrypted-connection scanning (Kaspersky, enterprise DLP) or a corporate MITM proxy that re-signs the upstream: export that root CA to PEM and point this at it. Unset = default trust, byte-identical behavior."
     desc_zh: "PEM 文件路径，包含要额外信任的根 CA（#3776），仅作用于 bili 自己的上游 fetch。与 Node 内置根证书及 NODE_EXTRA_CA_CERTS 中的条目合并——从不替换。安全软件做 HTTPS/加密连接扫描（卡巴斯基、企业 DLP）或企业 MITM 代理重签上游时使用：把该厂商根证书导出为 PEM 并指向此键。未设置 = 默认信任，行为逐字节不变。"
+  - key: network.upstreamProxyFailover
+    type: string
+    default: "unset (off)"
+    env: BILI_UPSTREAM_PROXY_FAILOVER
+    group: process
+    desc_en: "Opt-in direct failover: when a proxied forward exhausts its replay ladder on a fail-fast transport death, one last attempt goes out without the proxy. Only \"direct\" enables; unset or any other value keeps it off."
+    desc_zh: "可选直连兜底：经代理的转发在 fail-fast 传输故障上耗尽重试梯子后，做一次不走代理的直连尝试。仅 \"direct\" 启用；未设或其他值保持关闭。"
   - key: guardrails
     type: object
     default: "{} (all defaults)"

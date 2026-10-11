@@ -27,12 +27,12 @@ import { dumpRejectedBody } from "../error-dump.js";
 import { extractWsOversizeError, formatMiB, shedEgressIfOverBudget, shedWireImages, shedWireImagesToCount, type ShedStats } from "../egress-shed.js";
 import { conversationPromptSections, externalSummaryEnabled } from "../external-summary-surface.js";
 import { fakeBufCap, injectFakeCompletionHint, isFakeCompletion, maxFakeCompletionRetries } from "../fake-completion.js";
-import { fetchWithTimeout, fetchWithTransportRetry } from "../fetch-util.js";
+import { fetchWithTimeout } from "../fetch-util.js";
 import { currentFetchTransport } from "../fetch-transport.js";
 import { refForItemBytes } from "../image-rescale.js";
 import { countImagesInRawBody, upstreamHost } from "../image-tokens.js";
 import { log as loggerLog } from "../logger.js";
-import { dumpReqAllowed as knobDumpReqAllowed, limitsWsOutboundBytes, rawDumpDir as knobRawDumpDir } from "../knobs.js";
+import { dumpReqAllowed as knobDumpReqAllowed, limitsWsOutboundBytes, rawDumpDir as knobRawDumpDir, upstreamProxyFailoverMode as knobUpstreamProxyFailoverMode } from "../knobs.js";
 import { gcDumpDirIfConfigured } from "../state-gc.js";
 import { applyLaneCredential, laneCredential } from "../lane-credentials.js";
 import { CREDENTIAL_HEADER_RE, maskHeaderForLog, maskHeadersForLog, maskHostPortForDisplay, maskUrlForLog } from "../log-mask.js";
@@ -55,7 +55,7 @@ import { observeResponsesTerminalState } from "../stream-terminal.js";
 import { rewriteJsonResponseAsync, type RewriteCtx } from "../stream.js";
 import { safePrefix, safeSuffix, scrubLoneSurrogatesOnWire } from "../text-safe.js";
 import { clearUpstreamAlertsForHost, noteCircuitFailFastLog, recordUpstreamAlert, recordUpstreamCircuitFailure, recordUpstreamCircuitSuccess, upstreamCircuitBlockReason, upstreamCircuitLastFailureKind, upstreamCircuitRetryAfterSeconds } from "../upstream-alerts.js";
-import { describeUpstreamFailure, formatUpstreamError, proxyDispatcher, recordUpstreamConnection } from "../upstream-proxy.js";
+import { describeUpstreamFailure, fetchWithUpstreamProxyFailover, formatUpstreamError, proxyDispatcher, recordUpstreamConnection, upstreamFailoverEgress, type UpstreamFailoverFetch } from "../upstream-proxy.js";
 import { markExpectedFailFast, withUpstreamFailure, type UpstreamFailureKind } from "../upstream-fail.js";
 import { noteUpstreamThrottle429, noteUpstreamThrottleResolved, upstreamThrottleLocalReject } from "../upstream-throttle.js";
 import { applyEstimateCalibration, currentCalibrationFactor, inspectContextOverflow, isMarkerlessOverflowReject, MIN_ASSUMED_WINDOW_TOKENS, normalizeUpstreamOrigin, usageOutputTotal, usageTotals, type ContextOverflowInfo, type WireProtocol } from "../util.js";
@@ -832,16 +832,25 @@ async function forwardCaptured(
             return;
         }
     }
-    let upstreamResult: Awaited<ReturnType<typeof fetchWithTimeout>>;
+    let upstreamResult: UpstreamFailoverFetch;
     // #3701: the catch below replaces upstreamResult on a shrunken resend; capture the
     // FIRST attempt's timer handle separately because upstreamResult may never have been
     // assigned by the time a send failure lands in the catch.
     let firstAttemptClear: (() => void) | undefined;
+    // #1041: the egress the main attempt actually rode (undefined = direct, after the
+    // opt-in failover). The codex-catalog wrapper may hand back an offline replay, so the
+    // telemetry guard below only consumes this when a real wire attempt happened.
+    let sentViaProxy: string | undefined;
     try {
         const lane = prepared?.sidePassthrough ? "side" : prepared ? "main" : "passthrough";
-        const fetchPromise = fetchWithCodexCatalogCache(signal => fetchWithTransportRetry(upstreamUrl, init, undefined, signal, (info) => {
-            log("warn", `[${prepared?.session.id ?? "unknown"}] [acp-proxy] upstream ${info.detail}; retrying in ${info.delayMs}ms (attempt ${info.attempt}/${info.maxAttempts})`);
-        }), upstreamUrl, init, clientAbort.signal, log);
+        const fetchPromise = fetchWithCodexCatalogCache(async (signal) => {
+            const result = await fetchWithUpstreamProxyFailover(upstreamUrl, init, undefined, signal, (info) => {
+                log("warn", `[${prepared?.session.id ?? "unknown"}] [acp-proxy] upstream ${info.detail}; retrying in ${info.delayMs}ms (attempt ${info.attempt}/${info.maxAttempts})`);
+            }, proxyUrl, knobUpstreamProxyFailoverMode() === "direct", log);
+            // egressProxy carries the real egress — undefined after a direct failover (#1041)
+            sentViaProxy = result.egressProxy;
+            return result;
+        }, upstreamUrl, init, clientAbort.signal, log);
         const firstByteTimer = armFirstByteWatchdog({ url: upstreamUrl, method: req.method ?? "UNKNOWN", lane, sessionId: prepared?.session.id ?? "passthrough", log, signal: clientAbort.signal });
         try {
             upstreamResult = await fetchPromise;
@@ -850,18 +859,26 @@ async function forwardCaptured(
             clearTimeout(firstByteTimer);
         }
         if (!(isCodexCatalogRequest(upstreamUrl, init) && upstreamResult.response.headers.get("x-bili-model-catalog") === "offline-cache")) {
-            recordUpstreamConnection(upstreamUrl, proxyUrl);
+            // The snapshot records the REAL egress, not the configured one: an offline
+            // replay proves nothing, and a direct failover means "no proxy" (#1041).
+            recordUpstreamConnection(upstreamUrl, sentViaProxy);
             // #1682: a network response proves reachability; an offline replay does not.
             clearUpstreamAlertsForHost(upstreamUrl);
             recordUpstreamCircuitSuccess(upstreamUrl);
         }
     } catch (error) {
+        // #1041 design point A: the failover wrapper throws the LAST attempt's
+        // error once a direct fallback was ridden, so the configured proxyUrl is
+        // no longer the truth. Prefer the egress stamped on the error; an absent
+        // stamp means no failover engaged and proxyUrl still describes the path.
+        const failoverEgress = upstreamFailoverEgress(error);
+        const lastEgressProxy = failoverEgress === undefined ? proxyUrl : failoverEgress.proxy;
         const oversize = extractWsOversizeError(error);
         if (oversize === undefined) {
-            recordUpstreamConnection(upstreamUrl, proxyUrl, error, skippedProxy);
-            recordUpstreamAlert(upstreamUrl, error, proxyUrl !== undefined, skippedProxy);
-            const failure = describeUpstreamFailure(error, upstreamUrl, proxyUrl, skippedProxy);
-            recordUpstreamCircuitFailure(upstreamUrl, error, proxyUrl !== undefined, failure.message);
+            recordUpstreamConnection(upstreamUrl, lastEgressProxy, error, skippedProxy);
+            recordUpstreamAlert(upstreamUrl, error, lastEgressProxy !== undefined, skippedProxy);
+            const failure = describeUpstreamFailure(error, upstreamUrl, lastEgressProxy, skippedProxy);
+            recordUpstreamCircuitFailure(upstreamUrl, error, lastEgressProxy !== undefined, failure.message);
             // #604: a network-level failure (socket reset, timeout abort) also never
             // reports usage — arm the emergency shrink like the 5xx branch below.
             if (prepared && req.method !== "GET" && req.method !== "HEAD") armFailureShrink(prepared, log, "network failure", outboundPayloadBreakdown(prepared, opts, route, req.url ?? "").armEstimate);
@@ -959,6 +976,7 @@ async function forwardCaptured(
                 }),
                 clearTimer: upstreamResult.clearTimer,
                 stopIdleTimer: upstreamResult.stopIdleTimer,
+                egressProxy: upstreamResult.egressProxy,
             };
             const namedRejection = detectRoleRejection(upstreamResult.response.status, roleErrText);
             // #1996: placement-only rejections name no role (vLLM+Qwen
@@ -1079,6 +1097,7 @@ async function forwardCaptured(
                 }),
                 clearTimer: upstreamResult.clearTimer,
                 stopIdleTimer: upstreamResult.stopIdleTimer,
+                egressProxy: upstreamResult.egressProxy,
             };
             let strippedPckBody: string | null = null;
             let pckModel: string | undefined;

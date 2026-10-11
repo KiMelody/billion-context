@@ -2124,6 +2124,11 @@ type FileConfig = {
          *  SELF_SIGNED_CERT_IN_CHAIN. MERGED with Node's built-in roots, never replacing them.
          *  Env BILI_CA_FILE wins. */
         caFile?: string;
+        /** Upstream proxy direct-failover switch (#1041): only "direct" means
+         *  anything — when a proxied forward exhausts its replay ladder on a
+         *  fail-fast transport death, one last attempt goes out without the
+         *  proxy. Unset or any other value keeps it off. */
+        upstreamProxyFailover?: string;
     };
     /** Session persistence knobs (#2030) — was BILI_PERSIST_* env-only. */
     persist?: {

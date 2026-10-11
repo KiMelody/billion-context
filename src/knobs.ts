@@ -288,6 +288,19 @@ export function limitsHttpOutboundBytes(): number {
     return Number.isFinite(v) && v >= 0 ? Math.floor(v) : DEFAULT_HTTP_OUTBOUND_BYTES;
 }
 
+export type UpstreamProxyFailoverMode = "direct";
+
+/** BILI_UPSTREAM_PROXY_FAILOVER > network.upstreamProxyFailover > off. The only
+ *  value is "direct": when a PROXIED forward exhausts the replay ladder on a
+ *  fail-fast transport death (#1688 taxonomy), one last attempt goes out
+ *  without the proxy dispatcher (#1041). Any other value means off. Read per
+ *  call so the opt-in flips without a restart. */
+export function upstreamProxyFailoverMode(): UpstreamProxyFailoverMode | undefined {
+    const envRaw = process.env.BILI_UPSTREAM_PROXY_FAILOVER;
+    if (envRaw !== undefined) return envRaw.trim().toLowerCase() === "direct" ? "direct" : undefined;
+    return fileNetwork().upstreamProxyFailover === "direct" ? "direct" : undefined;
+}
+
 // --- session persistence (was BILI_PERSIST_* env-only) ---
 
 function filePersist() {
