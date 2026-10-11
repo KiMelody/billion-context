@@ -532,3 +532,10 @@ entries:
     desc_zh: "被拦截连接的 TLS 握手超时。"
     site_en: "<code>mitm.handshakeTimeoutMs</code> — TLS handshake timeout (default 10000)."
     site_zh: "<code>mitm.handshakeTimeoutMs</code> —— TLS 握手超时（默认 10000）。"
+  - key: mitm.excludeDomains
+    type: "string[]"
+    default: "[]"
+    env: BILI_MITM_EXCLUDE_DOMAINS
+    group: mitm
+    desc_en: "Hard MITM exclusions: hosts whose TLS is never decrypted even when whitelisted (gateway body-fingerprint anti-cheat, client layers that trust no custom CA — e.g. zcode.z.ai). Exclusion wins over every whitelist source; blind tunnels to these hosts are deliberate configuration."
+    desc_zh: "MITM 硬排除：即使被白名单命中也绝不解密的 host（网关体指纹反作弊、不信任自签 CA 的客户端层——如 zcode.z.ai）。排除胜过一切白名单源；对这些 host 的盲隧道是有意配置。"

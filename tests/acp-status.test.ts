@@ -158,6 +158,41 @@ test("#897: acp_status surfaces blind-tunneled CONNECT traffic as UNDECRYPTED TR
     }
 });
 
+test("#1040: acp_status splits excludeDomains-excluded hosts into an EXCLUDED HOSTS line", () => {
+    _resetBlindTunnelStatsForTest();
+    const prev = process.env.BILI_MITM_EXCLUDE_DOMAINS;
+    process.env.BILI_MITM_EXCLUDE_DOMAINS = "excluded.example.com";
+    try {
+        const ctx = makeCtx12();
+        recordBlindTunnel("excluded.example.com");
+        recordBlindTunnel("excluded.example.com");
+        recordBlindTunnel("relay.internal");
+        const out = handleAcpStatus({}, ctx).text;
+        const undecrypted = out.split("\n").find((l) => l.startsWith("UNDECRYPTED TRAFFIC"));
+        const excludedLine = out.split("\n").find((l) => l.startsWith("EXCLUDED HOSTS"));
+        assert.ok(undecrypted, "never-listed hosts keep the UNDECRYPTED section");
+        assert.ok(undecrypted!.includes("1 CONNECT tunnel(s)"), `excluded tunnels are NOT counted in UNDECRYPTED (got: ${undecrypted})`);
+        assert.ok(undecrypted!.includes("relay.internal×1"), "per-host counts list only never-listed hosts");
+        assert.ok(!undecrypted!.includes("excluded.example.com"), "excluded host does not leak into UNDECRYPTED");
+        assert.ok(undecrypted!.includes('add its model domain to "mitm".domains'), "never-listed hosts keep the remediation advice");
+        assert.ok(excludedLine, "excluded hosts get their own section");
+        assert.ok(excludedLine!.includes("2 CONNECT tunnel(s)"), `excluded tunnels counted on their own line (got: ${excludedLine})`);
+        assert.ok(excludedLine!.includes("excluded.example.com×2"), "per-host counts for excluded hosts");
+        assert.ok(!excludedLine!.includes('add its model domain to "mitm".domains'), "no add-to-whitelist advice for a deliberate exclusion");
+        assert.ok(excludedLine!.includes("excludeDomains"), "names the exclusion configuration");
+
+        _resetBlindTunnelStatsForTest();
+        recordBlindTunnel("excluded.example.com");
+        const out2 = handleAcpStatus({}, ctx).text;
+        assert.ok(!out2.includes("UNDECRYPTED TRAFFIC"), "no UNDECRYPTED section when every blind host is excluded");
+        assert.ok(out2.includes("EXCLUDED HOSTS"), "the excluded section still renders");
+    } finally {
+        if (prev === undefined) delete process.env.BILI_MITM_EXCLUDE_DOMAINS;
+        else process.env.BILI_MITM_EXCLUDE_DOMAINS = prev;
+        _resetBlindTunnelStatsForTest();
+    }
+});
+
 test("#2863: UNRECOGNIZED PATHS section renders the live count with an unambiguous stats pointer", () => {
     const ctx = makeCtx12();
     logUnrecognizedPath(() => {}, "/health");

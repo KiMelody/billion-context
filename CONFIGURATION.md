@@ -148,6 +148,7 @@ This index is generated from `website/config-reference/*.yaml` — edit the seed
 | `mitm.enabled` | boolean | true | BILI_MITM | HTTPS interception switch for login clients that hard-code their upstream; domains are whitelisted on first sight. |
 | `mitm.domains` | string[] | [] | BILI_MITM_DOMAINS | Explicit MITM whitelist domains (unioned with first-sight auto-whitelisting). |
 | `mitm.handshakeTimeoutMs` | number | 10000 | BILI_MITM_HANDSHAKE_TIMEOUT_MS | TLS handshake timeout for intercepted connections. |
+| `mitm.excludeDomains` | string[] | [] | BILI_MITM_EXCLUDE_DOMAINS | Hard MITM exclusions: hosts whose TLS is never decrypted even when whitelisted (gateway body-fingerprint anti-cheat, client layers that trust no custom CA — e.g. zcode.z.ai). Exclusion wins over every whitelist source; blind tunnels to these hosts are deliberate configuration. |
 
 **Process & persistence**
 
@@ -1846,6 +1847,7 @@ File keys resolve only when the matching env var is unset. Defaults in parenthes
 | `BILI_MCP_PROXY` | `native.attachUrl` | unset (discover per lane) |
 | `BILI_MITM` | `mitm.enabled` | true |
 | `BILI_MITM_DOMAINS` | `mitm.domains` | [] |
+| `BILI_MITM_EXCLUDE_DOMAINS` | `mitm.excludeDomains` | [] |
 | `BILI_MITM_HANDSHAKE_TIMEOUT_MS` | `mitm.handshakeTimeoutMs` | 10000 |
 | `BILI_MYSQL_DSN` | `storage.mysql.dsn` | unset |
 | `BILI_NATIVE_ATTACH_EXTERNAL` | `native.attachExternal` | false |

@@ -148,6 +148,7 @@
 | `mitm.enabled` | boolean | true | BILI_MITM | 面向写死 HTTPS 上游的登录客户端的拦截开关；域名首次发现即加入白名单。 |
 | `mitm.domains` | string[] | [] | BILI_MITM_DOMAINS | 显式 MITM 白名单域名（与首次发现的自动白名单取并集）。 |
 | `mitm.handshakeTimeoutMs` | number | 10000 | BILI_MITM_HANDSHAKE_TIMEOUT_MS | 被拦截连接的 TLS 握手超时。 |
+| `mitm.excludeDomains` | string[] | [] | BILI_MITM_EXCLUDE_DOMAINS | MITM 硬排除：即使被白名单命中也绝不解密的 host（网关体指纹反作弊、不信任自签 CA 的客户端层——如 zcode.z.ai）。排除胜过一切白名单源；对这些 host 的盲隧道是有意配置。 |
 
 **进程级配置块**
 
@@ -1829,6 +1830,7 @@ ACP 原生 agent（当前为 `pi` 扩展）会在每个进程内向代理上报�
 | `BILI_MCP_PROXY` | `native.attachUrl` | unset (discover per lane) |
 | `BILI_MITM` | `mitm.enabled` | true |
 | `BILI_MITM_DOMAINS` | `mitm.domains` | [] |
+| `BILI_MITM_EXCLUDE_DOMAINS` | `mitm.excludeDomains` | [] |
 | `BILI_MITM_HANDSHAKE_TIMEOUT_MS` | `mitm.handshakeTimeoutMs` | 10000 |
 | `BILI_MYSQL_DSN` | `storage.mysql.dsn` | unset |
 | `BILI_NATIVE_ATTACH_EXTERNAL` | `native.attachExternal` | false |

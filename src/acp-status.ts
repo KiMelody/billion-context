@@ -15,7 +15,7 @@ import { conflictClientOf, conflictEventsOf, formatConflictSection } from "./con
 import { getOpenUpstreamCircuits } from "./upstream-alerts.js";
 import { activeThrottleHolds } from "./upstream-throttle.js";
 import { dshLedgerFloorTokens } from "./server/budget.js";
-import { getBlindTunnelStats } from "./mitm.js";
+import { getBlindTunnelStats, isExcludedHost } from "./mitm.js";
 import { pckAblations } from "./pck-probe.js";
 import { getUnrecognizedPathStats } from "./server/observability.js";
 import { ccrEnabled, ccrLoopConfig, contentStoreOf } from "./store.js";
@@ -538,12 +538,21 @@ export function handleAcpStatus(args: Record<string, unknown>, ctx: AcpStatusCtx
         // entered any session, so "no compressed blocks" can be a routing
         // misconfiguration, not just a short conversation. Surface it here
         // where an operator actually looks when compression appears dead.
-        const hosts = Object.entries(blind.hosts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([h, n]) => `${h}×${n}`)
-            .join(", ");
-        extra.push("");
-        extra.push(`UNDECRYPTED TRAFFIC (instance-level): ${blind.total} CONNECT tunnel(s) to host(s) outside the MITM whitelist were blind-relayed since instance start — that traffic was never decrypted, so it never entered any session and CANNOT be compressed (${hosts}). To compress such a client: add its model domain to "mitm".domains in billion-context.json, restart bili, and make the client trust bili's root CA. Exact per-host counts: the blindTunnels field of GET /__bili/stats.`);
+        // Hosts excluded via excludeDomains are blind BY CONFIGURATION — they
+        // get their own line without the add-to-whitelist advice (#1040).
+        const entries = Object.entries(blind.hosts).sort((a, b) => b[1] - a[1]);
+        const excluded = entries.filter(([h]) => isExcludedHost(h));
+        const listed = entries.filter(([h]) => !isExcludedHost(h));
+        const fmt = (group: Array<[string, number]>) => group.map(([h, n]) => `${h}×${n}`).join(", ");
+        const sum = (group: Array<[string, number]>) => group.reduce((s, [, n]) => s + n, 0);
+        if (listed.length > 0) {
+            extra.push("");
+            extra.push(`UNDECRYPTED TRAFFIC (instance-level): ${sum(listed)} CONNECT tunnel(s) to host(s) outside the MITM whitelist were blind-relayed since instance start — that traffic was never decrypted, so it never entered any session and CANNOT be compressed (${fmt(listed)}). To compress such a client: add its model domain to "mitm".domains in billion-context.json, restart bili, and make the client trust bili's root CA. Exact per-host counts: the blindTunnels field of GET /__bili/stats.`);
+        }
+        if (excluded.length > 0) {
+            extra.push("");
+            extra.push(`EXCLUDED HOSTS (instance-level): ${sum(excluded)} CONNECT tunnel(s) to host(s) excluded by "mitm".excludeDomains / BILI_MITM_EXCLUDE_DOMAINS were blind-relayed by configuration — no compression for these hosts by design (${fmt(excluded)}). Remove them from the exclusion lists and restart if that is unexpected. Exact per-host counts: the blindTunnels field of GET /__bili/stats.`);
+        }
     }
     const unrec = getUnrecognizedPathStats();
     if (unrec.total > 0) {

@@ -6,7 +6,7 @@ import { connectThroughProxy } from "./upstream-proxy.js";
 import { discoverMitmDomains } from "./discover.js";
 import { isLoopbackAddress } from "./util.js";
 import { maskHostForLog, maskHostInText, maskHostPortForLog } from "./log-mask.js";
-import { mitmHandshakeTimeoutMs as knobMitmHandshakeTimeoutMs } from "./knobs.js";
+import { mitmExcludeDomains, mitmHandshakeTimeoutMs as knobMitmHandshakeTimeoutMs } from "./knobs.js";
 import { DEFAULT_MITM_DOMAINS, matchesAnyMitmDomain } from "./mitm-domains.js";
 
 // Re-exported so existing importers (launcher.ts) keep their path; the const
@@ -62,12 +62,18 @@ interface BlindTunnelStats {
 }
 
 /** Record one established blind TCP tunnel for `host`. Warns once per host
- *  per process with the remediation steps. */
+ *  per process. Hosts excluded by excludeDomains get a confirmation line —
+ *  the tunnel is deliberate configuration, so no remediation advice — while
+ *  every other host gets the #897 fix steps. */
 export function recordBlindTunnel(host: string, log?: Logger): void {
     blindTunnelCounts.set(host, (blindTunnelCounts.get(host) ?? 0) + 1);
     if (!warnedBlindTunnels.has(host)) {
         warnedBlindTunnels.add(host);
-        log?.(`mitm ${maskHostForLog(host)} BLIND TUNNEL WARNING: this host is not in the MITM whitelist, so bili relays its TLS traffic opaquely and CANNOT see or compress this client's model requests. To compress it: add its domain to "mitm".domains in billion-context.json (or BILI_MITM_DOMAINS), restart bili, and make the client trust bili's root CA (${rootCaPath()}). Exact target hosts: the blindTunnels field of GET /__bili/stats (loopback only); set BILI_LOG_MASK_HOSTS=0 to show them in this log too.`);
+        if (isExcludedHost(host)) {
+            log?.(`mitm ${maskHostForLog(host)} excluded from MITM by excludeDomains — relaying this host's TLS opaquely by configuration ("mitm".excludeDomains / BILI_MITM_EXCLUDE_DOMAINS). No compression for this host; remove it from those lists and restart if that is unexpected.`);
+        } else {
+            log?.(`mitm ${maskHostForLog(host)} BLIND TUNNEL WARNING: this host is not in the MITM whitelist, so bili relays its TLS traffic opaquely and CANNOT see or compress this client's model requests. To compress it: add its domain to "mitm".domains in billion-context.json (or BILI_MITM_DOMAINS), restart bili, and make the client trust bili's root CA (${rootCaPath()}). Exact target hosts: the blindTunnels field of GET /__bili/stats (loopback only); set BILI_LOG_MASK_HOSTS=0 to show them in this log too.`);
+        }
     }
 }
 
@@ -95,12 +101,26 @@ function mitmHandshakeTimeoutMs(): number {
     return knobMitmHandshakeTimeoutMs();
 }
 
+/** Hard exclusion: hosts whose TLS must NEVER be terminated locally even
+ *  though they are whitelisted (DEFAULT/config/discovered). Gateway/auth
+ *  endpoints that fingerprint request bodies (e.g. zcode.z.ai, #661) or whose
+ *  client layer trusts no custom CA must pass through opaquely. Matches by
+ *  exact host or dot-suffix, case-insensitive — same matcher as the
+ *  whitelist (matchesAnyMitmDomain), so a hyphen-spoofed name
+ *  (cdn-zcode.z.ai) is NOT caught. */
+export function isExcludedHost(host: string): boolean {
+    return matchesAnyMitmDomain(host, mitmExcludeDomains());
+}
+
 /** True if `host` should be MITM-decrypted. Matches by exact hostname or a
  *  domain suffix (so `api.openai.com` and `chatgpt.com` both work, and
  *  subdomains like `edge.chatgpt.com` are covered). The candidate set is the
  *  binary-hardcoded DEFAULT_MITM_DOMAINS + caller-supplied extras + domains
- *  auto-discovered from client config files (see discoverMitmDomains). */
+ *  auto-discovered from client config files (see discoverMitmDomains).
+ *  Excluded domains (mitm.excludeDomains / BILI_MITM_EXCLUDE_DOMAINS) always
+ *  lose — exclusion wins over every whitelist source (#1040). */
 export function isMitmHost(host: string, extraDomains: string[] = []): boolean {
+    if (isExcludedHost(host)) return false;
     return matchesAnyMitmDomain(host, [...DEFAULT_MITM_DOMAINS, ...extraDomains, ...discoverMitmDomains()]);
 }
 
@@ -116,7 +136,8 @@ type Logger = (msg: string) => void;
  *       pipeline (prepare* → inject compress → forward) runs unchanged, with
  *       the socket marked so resolveUpstream knows the real upstream.
  *    3. If host is NOT on the whitelist → blind TCP tunnel (CONNECT 200 +
- *       bidirectional pipe). We never see the cleartext.
+ *       bidirectional pipe). We never see the cleartext. Hosts excluded via
+ *       mitm.excludeDomains take this path too — even when whitelisted (#1040).
  *
  *  Remote-client policy (#240): loopback clients get the full behavior above.
  *  When the server is explicitly bound to a non-loopback host

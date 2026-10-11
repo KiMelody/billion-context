@@ -1832,7 +1832,7 @@ type FileConfig = {
      *  Resolved by src/cache-keepalive.ts; env BILI_CACHE_KEEPALIVE* wins. */
     cacheKeepalive?: CacheKeepaliveSettings;
     /** MITM block (#2030: + handshakeTimeoutMs, was env BILI_MITM_HANDSHAKE_TIMEOUT_MS only). */
-    mitm?: { enabled?: boolean; domains?: string[]; handshakeTimeoutMs?: number };
+    mitm?: { enabled?: boolean; domains?: string[]; handshakeTimeoutMs?: number; excludeDomains?: string[] };
     /** Snapshot-render observability block. `shadow` (boolean, default true)
      *  computes the snapshot view on armed turns without using it — counters
      *  surface in the web panel; env BILI_SNAPSHOT_SHADOW wins (#3756). */

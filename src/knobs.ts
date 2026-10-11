@@ -228,6 +228,24 @@ export function mitmHandshakeTimeoutMs(): number {
     return Number.isFinite(v) && v > 0 ? Math.floor(v) : MITM_HANDSHAKE_TIMEOUT_MS_DEFAULT;
 }
 
+/** BILI_MITM_EXCLUDE_DOMAINS > mitm.excludeDomains > []. Hosts whose TLS must
+ *  never be MITM-decrypted even when whitelisted — gateway body-fingerprint
+ *  anti-cheat (#661, e.g. zcode.z.ai) and client layers that trust no custom
+ *  CA. The env tier is CSV and a set env var owns the knob; the file tier is
+ *  strictly a JSON string[] (anything else → []). Entries are trimmed,
+ *  lowercased, empties dropped. */
+export function mitmExcludeDomains(): string[] {
+    const envRaw = process.env.BILI_MITM_EXCLUDE_DOMAINS;
+    if (envRaw !== undefined) {
+        return envRaw.split(",").map((d) => d.trim().toLowerCase()).filter((d) => d.length > 0);
+    }
+    const file = loadConfigFile().mitm?.excludeDomains;
+    if (!Array.isArray(file)) return [];
+    return file.filter((d): d is string => typeof d === "string")
+        .map((d) => d.trim().toLowerCase())
+        .filter((d) => d.length > 0);
+}
+
 // --- request-body byte budgets (#3128) ---
 
 const DEFAULT_LIMITS_RECEIVE_BYTES = 5 * 1024 * 1024 * 1024;
