@@ -80,7 +80,7 @@ function parseSeed(text, file) {
   const entries = [];
   let cur = null;
   let inEntries = false;
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/^\s*$/.test(line) || /^\s*#/.test(line)) continue;
